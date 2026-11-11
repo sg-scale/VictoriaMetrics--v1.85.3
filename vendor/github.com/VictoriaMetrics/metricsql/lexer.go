@@ -37,6 +37,11 @@ func (lex *lexer) Init(s string) {
 	lex.sTail = s
 }
 
+func (lex *lexer) PushBack(currToken, sHead string) {
+	lex.Token = currToken
+	lex.sTail = sHead + lex.sTail
+}
+
 func (lex *lexer) Next() error {
 	if lex.err != nil {
 		return lex.err
@@ -117,6 +122,14 @@ again:
 		}
 		goto tokenFoundLabel
 	}
+	if strings.HasPrefix(s, "$__interval") {
+		lex.sTail = s[len("$__interval"):]
+		return "$__interval", nil
+	}
+	if strings.HasPrefix(s, "$__rate_interval") {
+		lex.sTail = s[len("$__rate_interval"):]
+		return "$__interval", nil
+	}
 	return "", fmt.Errorf("cannot recognize %q", s)
 
 tokenFoundLabel:
@@ -152,10 +165,12 @@ func scanString(s string) (string, error) {
 func parsePositiveNumber(s string) (float64, error) {
 	if isSpecialIntegerPrefix(s) {
 		n, err := strconv.ParseInt(s, 0, 64)
-		if err != nil {
-			return 0, err
+		if err == nil {
+			return float64(n), nil
 		}
-		return float64(n), nil
+		// Fall back to float parser for Prometheus compatibility.
+		// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/11621
+		return strconv.ParseFloat(s, 64)
 	}
 	s = strings.ToLower(s)
 	m := float64(1)
@@ -228,7 +243,7 @@ func scanPositiveNumber(s string) (string, error) {
 		}
 		return s[:i], nil
 	}
-	for i < len(s) && isDecimalChar(s[i]) {
+	for i < len(s) && isDecimalCharOrUnderscore(s[i]) {
 		i++
 	}
 
@@ -253,7 +268,7 @@ func scanPositiveNumber(s string) (string, error) {
 		// Scan fractional part. It cannot be empty.
 		i++
 		j := i
-		for j < len(s) && isDecimalChar(s[j]) {
+		for j < len(s) && isDecimalCharOrUnderscore(s[j]) {
 			j++
 		}
 		i = j
@@ -289,6 +304,9 @@ func scanPositiveNumber(s string) (string, error) {
 }
 
 func scanNumMultiplier(s string) int {
+	if len(s) > 3 {
+		s = s[:3]
+	}
 	s = strings.ToLower(s)
 	switch true {
 	case strings.HasPrefix(s, "kib"):
@@ -331,19 +349,22 @@ func scanNumMultiplier(s string) int {
 func scanIdent(s string) string {
 	i := 0
 	for i < len(s) {
-		if isIdentChar(s[i]) {
-			i++
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if i == 0 && isFirstIdentChar(r) || i > 0 && isIdentChar(r) {
+			i += size
 			continue
 		}
-		if s[i] != '\\' {
+		if r != '\\' {
 			break
 		}
-		i++
-
-		// Do not verify the next char, since it is escaped.
-		// The next char may be encoded as multi-byte UTF8 sequence. See https://en.wikipedia.org/wiki/UTF-8#Encoding
-		_, size := utf8.DecodeRuneInString(s[i:])
 		i += size
+		r, n := decodeEscapeSequence(s[i:])
+		if r == utf8.RuneError {
+			// Invalid escape sequence
+			i -= size
+			break
+		}
+		i += n
 	}
 	if i == 0 {
 		panic("BUG: scanIdent couldn't find a single ident char; make sure isIdentPrefix called before scanIdent")
@@ -360,23 +381,12 @@ func unescapeIdent(s string) string {
 	for {
 		dst = append(dst, s[:n]...)
 		s = s[n+1:]
-		if len(s) == 0 {
-			return string(dst)
-		}
-		if s[0] == 'x' && len(s) >= 3 {
-			h1 := fromHex(s[1])
-			h2 := fromHex(s[2])
-			if h1 >= 0 && h2 >= 0 {
-				dst = append(dst, byte((h1<<4)|h2))
-				s = s[3:]
-			} else {
-				dst = append(dst, s[0])
-				s = s[1:]
-			}
+		r, size := decodeEscapeSequence(s)
+		if r == utf8.RuneError {
+			// Cannot decode escape sequence. Put it in the output as is
+			dst = append(dst, '\\')
 		} else {
-			// UTF8 char. See https://en.wikipedia.org/wiki/UTF-8#Encoding
-			_, size := utf8.DecodeRuneInString(s)
-			dst = append(dst, s[:size]...)
+			dst = utf8.AppendRune(dst, r)
 			s = s[size:]
 		}
 		n = strings.IndexByte(s, '\\')
@@ -387,51 +397,51 @@ func unescapeIdent(s string) string {
 	}
 }
 
-func fromHex(ch byte) int {
-	if ch >= '0' && ch <= '9' {
-		return int(ch - '0')
+func hasEscapedChars(s string) bool {
+	i := 0
+	for i < len(s) {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if i == 0 && !isFirstIdentChar(r) || i > 0 && !isIdentChar(r) {
+			return true
+		}
+		i += size
 	}
-	if ch >= 'a' && ch <= 'f' {
-		return int((ch - 'a') + 10)
-	}
-	if ch >= 'A' && ch <= 'F' {
-		return int((ch - 'A') + 10)
-	}
-	return -1
+	return false
 }
 
-func toHex(n byte) byte {
-	if n < 10 {
-		return '0' + n
+func appendQuotedIdent(dst []byte, s string) []byte {
+	dst = utf8.AppendRune(dst, '"')
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == '"' || r == '\\' {
+			dst = append(dst, '\\')
+		}
+		dst = utf8.AppendRune(dst, r)
+		i += size
 	}
-	return 'a' + (n - 10)
+	dst = utf8.AppendRune(dst, '"')
+	return dst
 }
 
 func appendEscapedIdent(dst []byte, s string) []byte {
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-		if isIdentChar(ch) {
-			if i == 0 && !isFirstIdentChar(ch) {
-				// hex-encode the first char
-				dst = append(dst, '\\', 'x', toHex(ch>>4), toHex(ch&0xf))
-			} else {
-				dst = append(dst, ch)
-			}
-			continue
-		}
-
-		// escape ch
-		dst = append(dst, '\\')
+	i := 0
+	for i < len(s) {
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if r != utf8.RuneError && unicode.IsPrint(r) {
-			dst = append(dst, s[i:i+size]...)
-			i += size - 1
+		if i == 0 && isFirstIdentChar(r) || i > 0 && isIdentChar(r) {
+			dst = utf8.AppendRune(dst, r)
 		} else {
-			// hex-encode non-printable chars
-			dst = append(dst, 'x', toHex(ch>>4), toHex(ch&0xf))
+			dst = appendEscapeSequence(dst, r)
 		}
+		i += size
 	}
 	return dst
+}
+
+func ifEscapedCharsAppendQuotedIdent(dst []byte, s string) []byte {
+	if hasEscapedChars(s) {
+		return appendQuotedIdent(dst, s)
+	}
+	return appendEscapedIdent(dst, s)
 }
 
 func (lex *lexer) Prev() {
@@ -529,6 +539,9 @@ func scanSpecialIntegerPrefix(s string) (skipChars int, isHex bool) {
 }
 
 func isPositiveDuration(s string) bool {
+	if s == "$__interval" {
+		return true
+	}
 	n := scanDuration(s)
 	return n == len(s)
 }
@@ -590,18 +603,26 @@ func DurationValue(s string, step int64) (int64, error) {
 			isMinus = true
 		}
 	}
-	if math.Abs(d) > 1<<63-1 {
-		return 0, fmt.Errorf("too big duration %.0fms", d)
+	if d > math.MaxInt64 {
+		// Truncate too big durations. See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/8447
+		return math.MaxInt64, nil
+	}
+	if d < math.MinInt64 {
+		// Truncate too small durations. See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/8447
+		return math.MinInt64, nil
 	}
 	return int64(d), nil
 }
 
 func parseSingleDuration(s string, step int64) (float64, error) {
-	numPart := s[:len(s)-1]
-	if strings.HasSuffix(numPart, "m") {
-		// Duration in ms
-		numPart = numPart[:len(numPart)-1]
+	if s == "$__interval" {
+		return float64(step), nil
 	}
+
+	s = strings.ToLower(s)
+	numPart := s[:len(s)-1]
+	// Strip trailing m if the duration is in ms
+	numPart = strings.TrimSuffix(numPart, "m")
 	f, err := strconv.ParseFloat(numPart, 64)
 	if err != nil {
 		return 0, fmt.Errorf("cannot parse duration %q: %s", s, err)
@@ -609,25 +630,25 @@ func parseSingleDuration(s string, step int64) (float64, error) {
 	var mp float64
 	switch s[len(numPart):] {
 	case "ms":
-		mp = 1e-3
-	case "s":
 		mp = 1
+	case "s":
+		mp = 1000
 	case "m":
-		mp = 60
+		mp = 60 * 1000
 	case "h":
-		mp = 60 * 60
+		mp = 60 * 60 * 1000
 	case "d":
-		mp = 24 * 60 * 60
+		mp = 24 * 60 * 60 * 1000
 	case "w":
-		mp = 7 * 24 * 60 * 60
+		mp = 7 * 24 * 60 * 60 * 1000
 	case "y":
-		mp = 365 * 24 * 60 * 60
+		mp = 365 * 24 * 60 * 60 * 1000
 	case "i":
-		mp = float64(step) / 1e3
+		mp = float64(step)
 	default:
 		return 0, fmt.Errorf("invalid duration suffix in %q", s)
 	}
-	return mp * f * 1e3, nil
+	return mp * f, nil
 }
 
 // scanDuration scans duration, which must start with positive num.
@@ -660,6 +681,9 @@ func scanSingleDuration(s string, canBeNegative bool) int {
 	if s[0] == '-' && canBeNegative {
 		i++
 	}
+	if s[i:] == "$__interval" {
+		return i + len("$__interval")
+	}
 	for i < len(s) && isDecimalChar(s[i]) {
 		i++
 	}
@@ -667,23 +691,34 @@ func scanSingleDuration(s string, canBeNegative bool) int {
 		return -1
 	}
 	if s[i] == '.' {
-		j := i
 		i++
 		for i < len(s) && isDecimalChar(s[i]) {
 			i++
 		}
-		if i == j || i == len(s) {
+		if i == len(s) {
 			return -1
 		}
 	}
-	switch s[i] {
+	switch unicode.ToLower(rune(s[i])) {
 	case 'm':
-		if i+1 < len(s) && s[i+1] == 's' {
-			// duration in ms
-			return i + 2
+		if i+1 < len(s) {
+			switch unicode.ToLower(rune(s[i+1])) {
+			case 's':
+				// duration in ms
+				return i + 2
+			case 'i', 'b':
+				// This is not a duration, but Mi or MB suffix.
+				// See parsePositiveNumber() and https://github.com/VictoriaMetrics/VictoriaMetrics/issues/3664
+				return -1
+			}
 		}
-		// duration in minutes
-		return i + 1
+		// Allow small m for durtion in minutes.
+		// Big M means 1e6.
+		// See parsePositiveNumber() and https://github.com/VictoriaMetrics/VictoriaMetrics/issues/3664
+		if s[i] == 'm' {
+			return i + 1
+		}
+		return -1
 	case 's', 'h', 'd', 'w', 'y', 'i':
 		return i + 1
 	default:
@@ -695,6 +730,10 @@ func isDecimalChar(ch byte) bool {
 	return ch >= '0' && ch <= '9'
 }
 
+func isDecimalCharOrUnderscore(ch byte) bool {
+	return isDecimalChar(ch) || ch == '_'
+}
+
 func isHexChar(ch byte) bool {
 	return isDecimalChar(ch) || ch >= 'a' && ch <= 'f' || ch >= 'A' && ch <= 'F'
 }
@@ -703,25 +742,26 @@ func isIdentPrefix(s string) bool {
 	if len(s) == 0 {
 		return false
 	}
-	if s[0] == '\\' {
-		// Assume this is an escape char for the next char.
-		return true
+	r, size := utf8.DecodeRuneInString(s)
+	if r == '\\' {
+		r, _ = decodeEscapeSequence(s[size:])
+		return r != utf8.RuneError
 	}
-	return isFirstIdentChar(s[0])
+	return isFirstIdentChar(r)
 }
 
-func isFirstIdentChar(ch byte) bool {
-	if ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' {
+func isFirstIdentChar(r rune) bool {
+	if unicode.IsLetter(r) {
 		return true
 	}
-	return ch == '_' || ch == ':'
+	return r == '_' || r == ':'
 }
 
-func isIdentChar(ch byte) bool {
-	if isFirstIdentChar(ch) {
+func isIdentChar(r rune) bool {
+	if isFirstIdentChar(r) {
 		return true
 	}
-	return isDecimalChar(ch) || ch == '.'
+	return r < 256 && isDecimalChar(byte(r)) || r == '.'
 }
 
 func isSpaceChar(ch byte) bool {
@@ -731,4 +771,68 @@ func isSpaceChar(ch byte) bool {
 	default:
 		return false
 	}
+}
+
+func appendEscapeSequence(dst []byte, r rune) []byte {
+	dst = append(dst, '\\')
+	if unicode.IsPrint(r) {
+		return utf8.AppendRune(dst, r)
+	}
+	// hex-encode non-printable chars
+	if r < 256 {
+		return append(dst, 'x', toHex(byte(r>>4)), toHex(byte(r&0xf)))
+	}
+	return append(dst, 'u', toHex(byte(r>>12)), toHex(byte((r>>8)&0xf)), toHex(byte(r>>4)), toHex(byte(r&0xf)))
+}
+
+func decodeEscapeSequence(s string) (rune, int) {
+	if strings.HasPrefix(s, "x") || strings.HasPrefix(s, "X") {
+		if len(s) >= 3 {
+			h1 := fromHex(s[1])
+			h2 := fromHex(s[2])
+			if h1 >= 0 && h2 >= 0 {
+				r := rune((h1 << 4) | h2)
+				return r, 3
+			}
+		}
+		return utf8.RuneError, 0
+	}
+	if strings.HasPrefix(s, "u") || strings.HasPrefix(s, "U") {
+		if len(s) >= 5 {
+			h1 := fromHex(s[1])
+			h2 := fromHex(s[2])
+			h3 := fromHex(s[3])
+			h4 := fromHex(s[4])
+			if h1 >= 0 && h2 >= 0 && h3 >= 0 && h4 >= 0 {
+				return rune((h1 << 12) | (h2 << 8) | (h3 << 4) | h4), 5
+			}
+		}
+		return utf8.RuneError, 0
+	}
+	r, size := utf8.DecodeRuneInString(s)
+	if unicode.IsPrint(r) {
+		return r, size
+	}
+	// Improperly escaped non-printable char
+	return utf8.RuneError, 0
+}
+
+func fromHex(ch byte) int {
+	if ch >= '0' && ch <= '9' {
+		return int(ch - '0')
+	}
+	if ch >= 'a' && ch <= 'f' {
+		return int((ch - 'a') + 10)
+	}
+	if ch >= 'A' && ch <= 'F' {
+		return int((ch - 'A') + 10)
+	}
+	return -1
+}
+
+func toHex(n byte) byte {
+	if n < 10 {
+		return '0' + n
+	}
+	return 'a' + (n - 10)
 }

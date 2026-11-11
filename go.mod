@@ -1,6 +1,6 @@
 module github.com/VictoriaMetrics/VictoriaMetrics
 
-go 1.19
+go 1.24
 
 require (
 	cloud.google.com/go/storage v1.28.1
@@ -26,7 +26,7 @@ require (
 	github.com/klauspost/compress v1.15.13
 	github.com/prometheus/prometheus v0.40.7
 	github.com/urfave/cli/v2 v2.23.7
-	github.com/valyala/fastjson v1.6.3
+	github.com/valyala/fastjson v1.6.10
 	github.com/valyala/fastrand v1.1.0
 	github.com/valyala/fasttemplate v1.2.2
 	github.com/valyala/gozstd v1.17.0

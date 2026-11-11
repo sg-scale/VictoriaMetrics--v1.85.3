@@ -1,12 +1,12 @@
 module github.com/VictoriaMetrics/VictoriaMetrics
 
-go 1.19
+go 1.24.0
 
 require (
 	cloud.google.com/go/storage v1.28.1
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.2.0
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v0.6.1
-	github.com/VictoriaMetrics/fastcache v1.12.0
+	github.com/VictoriaMetrics/fastcache v1.13.3
 
 	// Do not use the original github.com/valyala/fasthttp because of issues
 	// like https://github.com/valyala/fasthttp/commit/996610f021ff45fdc98c2ce7884d5fa4e7f9199b
@@ -17,10 +17,10 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.18.6
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.11.45
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.29.6
-	github.com/cespare/xxhash/v2 v2.2.0
+	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/cheggaaa/pb/v3 v3.1.0
 	github.com/gogo/protobuf v1.3.2
-	github.com/golang/snappy v0.0.4
+	github.com/golang/snappy v1.0.0
 	github.com/googleapis/gax-go/v2 v2.7.0
 	github.com/influxdata/influxdb v1.11.0
 	github.com/klauspost/compress v1.15.13
@@ -33,7 +33,7 @@ require (
 	github.com/valyala/quicktemplate v1.7.0
 	golang.org/x/net v0.4.0
 	golang.org/x/oauth2 v0.3.0
-	golang.org/x/sys v0.3.0
+	golang.org/x/sys v0.34.0
 	google.golang.org/api v0.105.0
 	gopkg.in/yaml.v2 v2.4.0
 )

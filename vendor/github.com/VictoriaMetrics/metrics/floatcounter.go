@@ -35,7 +35,7 @@ func (fc *FloatCounter) Add(n float64) {
 	fc.mu.Unlock()
 }
 
-// Sub substracts n from fc.
+// Sub subtracts n from fc.
 func (fc *FloatCounter) Sub(n float64) {
 	fc.mu.Lock()
 	fc.n -= n
@@ -61,6 +61,10 @@ func (fc *FloatCounter) Set(n float64) {
 func (fc *FloatCounter) marshalTo(prefix string, w io.Writer) {
 	v := fc.Get()
 	fmt.Fprintf(w, "%s %g\n", prefix, v)
+}
+
+func (fc *FloatCounter) metricType() string {
+	return "counter"
 }
 
 // GetOrCreateFloatCounter returns registered FloatCounter with the given name
